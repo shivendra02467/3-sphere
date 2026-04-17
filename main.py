@@ -1,16 +1,6 @@
-import vispy
-vispy.use('pyqt5')
+import pyray as pr
 import numpy as np
-from vispy import app, gloo
 import time
-
-vertex_shader = """
-#version 120
-attribute vec2 a_position;
-void main() {
-    gl_Position = vec4(a_position, 0.0, 1.0);
-}
-"""
 
 fragment_shader = """
 #version 120
@@ -157,169 +147,118 @@ def orthonormalize_at(x, vectors):
         outs.append(vt)
     return outs
 
-class Canvas(app.Canvas):
-    def __init__(self):
-        app.Canvas.__init__(self, keys='interactive', size=(900, 600), title='S^3')
-        self.program = gloo.Program(vertex_shader, fragment_shader)
+def main():
+    width, height = 900, 600
+    pr.init_window(width, height, "S^3")
+    pr.set_target_fps(60)
 
-        verts = np.array([[-1.0, -1.0],
-                          [-1.0,  1.0],
-                          [ 1.0, -1.0],
-                          [ 1.0,  1.0]], dtype=np.float32)
-        self.vbo = gloo.VertexBuffer(verts)
-        self.program['a_position'] = self.vbo
+    shader = pr.load_shader_from_memory(pr.ffi.NULL, fragment_shader)
 
-        self.program['iResolution'] = np.array(self.size, dtype=np.float32)
-        self.program['iTime'] = 0.0
+    loc_res = pr.get_shader_location(shader, "iResolution")
+    loc_time = pr.get_shader_location(shader, "iTime")
+    loc_cam = pr.get_shader_location(shader, "cameraPos")
+    loc_fwd = pr.get_shader_location(shader, "forward")
+    loc_right = pr.get_shader_location(shader, "right")
+    loc_up = pr.get_shader_location(shader, "up")
 
-        self.cameraPos = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    cameraPos = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    f = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float64)
+    r = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float64)
+    u = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
 
-        f = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float64)
-        r = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float64)
-        u = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+    f = normalize_safe(project_to_tangent(cameraPos, f))
+    r = project_to_tangent(cameraPos, r)
+    r = r - f * np.dot(f, r)
+    r = normalize_safe(r)
+    u = project_to_tangent(cameraPos, u) - f*np.dot(f, u) - r*np.dot(r, u)
+    u = normalize_safe(u)
 
-        f = normalize_safe(project_to_tangent(self.cameraPos, f))
-        r = project_to_tangent(self.cameraPos, r)
-        r = r - f * np.dot(f, r)
-        r = normalize_safe(r)
-        u = project_to_tangent(self.cameraPos, u) - f*np.dot(f, u) - r*np.dot(r, u)
-        u = normalize_safe(u)
+    cameraDirs = [f, r, u]
 
-        self.cameraDirs = [f, r, u]
+    moveSpeed = 1.2
+    mouse_sensitivity = 0.004
+    t0 = time.perf_counter()
 
-        self.vv = self.cameraDirs[0].copy()
-
-        self.moveSpeed = 1.2
-        self.keyState = {}
-        self.t0 = time.perf_counter()
-        self.last_time = self.t0
-
-        self.mouse_down = False
-        self.last_mouse_pos = None
-        self.mouse_sensitivity = 0.004
-
-        self.timer = app.Timer('auto', connect=self.on_timer, start=True)
-        gloo.set_viewport(0, 0, *self.size)
-
-        self.program['cameraPos'] = self.cameraPos.astype(np.float32)
-        self.program['forward'] = self.cameraDirs[0].astype(np.float32)
-        self.program['right']   = self.cameraDirs[1].astype(np.float32)
-        self.program['up']      = self.cameraDirs[2].astype(np.float32)
-
-        self.show()
-
-    def on_key_press(self, event):
-        if event.key is None or event.key.name is None: return
-        self.keyState[event.key.name.upper()] = True
-
-    def on_key_release(self, event):
-        if event.key is None or event.key.name is None: return
-        self.keyState[event.key.name.upper()] = False
-
-    def on_mouse_press(self, event):
-        self.mouse_down = True
-        self.last_mouse_pos = np.array(event.pos, dtype=np.float64)
-
-    def on_mouse_release(self, event):
-        self.mouse_down = False
-        self.last_mouse_pos = None
-
-    def on_mouse_move(self, event):
-        if not self.mouse_down: return
-        if self.last_mouse_pos is None:
-            self.last_mouse_pos = np.array(event.pos, dtype=np.float64)
-            return
-        cur = np.array(event.pos, dtype=np.float64)
-        delta = cur - self.last_mouse_pos
-        self.last_mouse_pos = cur
-        dx, dy = delta[0], -delta[1]
-        yaw = -dx * self.mouse_sensitivity
-        pitch = -dy * self.mouse_sensitivity
-
-        f = self.cameraDirs[0]; r = self.cameraDirs[1]; u = self.cameraDirs[2]
-
-        ca = np.cos(yaw); sa = np.sin(yaw)
-        f1 = ca*f + sa*r
-        r1 = -sa*f + ca*r
-
-        cb = np.cos(pitch); sb = np.sin(pitch)
-        f2 = cb*f1 + sb*u
-        u2 = -sb*f1 + cb*u
-
-        f2 = normalize_safe(project_to_tangent(self.cameraPos, f2))
-        r2 = normalize_safe(project_to_tangent(self.cameraPos, r1))
-        r2 = r2 - f2 * np.dot(f2, r2)
-        r2 = normalize_safe(r2)
-        u2 = project_to_tangent(self.cameraPos, u2)
-        u2 = u2 - f2*np.dot(f2, u2) - r2*np.dot(r2, u2)
-        u2 = normalize_safe(u2)
-
-        self.cameraDirs = [f2, r2, u2]
-        self.vv = f2.copy()
-
-        self.program['forward'] = f2.astype(np.float32)
-        self.program['right']   = r2.astype(np.float32)
-        self.program['up']      = u2.astype(np.float32)
-
-    def on_resize(self, event):
-        w, h = event.physical_size
-        gloo.set_viewport(0, 0, w, h)
-        self.program['iResolution'] = np.array((w, h), dtype=np.float32)
-
-    def update_camera(self, dt):
-        local_disp = np.zeros(4, dtype=np.float64)
-        speed = self.moveSpeed * dt
-
-        if self.keyState.get('W', False):
-            local_disp += self.cameraDirs[0] * speed
-        if self.keyState.get('S', False):
-            local_disp -= self.cameraDirs[0] * speed
-        if self.keyState.get('D', False):
-            local_disp += self.cameraDirs[1] * speed
-        if self.keyState.get('A', False):
-            local_disp -= self.cameraDirs[1] * speed
-        if self.keyState.get('E', False):
-            local_disp += self.cameraDirs[2] * speed
-        if self.keyState.get('Q', False):
-            local_disp -= self.cameraDirs[2] * speed
-
-        if np.allclose(local_disp, 0.0):
-            self.program['cameraPos'] = self.cameraPos.astype(np.float32)
-            self.program['forward'] = self.cameraDirs[0].astype(np.float32)
-            self.program['right']   = self.cameraDirs[1].astype(np.float32)
-            self.program['up']      = self.cameraDirs[2].astype(np.float32)
-            return
-
-        old_pos = self.cameraPos.copy()
-        new_dirs = [parallel_transport(old_pos, local_disp, d, 1.0) for d in self.cameraDirs]
-        new_pos = retract(old_pos, local_disp)
-
-        new_dirs = orthonormalize_at(new_pos, new_dirs)
-
-        self.cameraPos = normalize_safe(new_pos)
-        self.cameraDirs = new_dirs
-        self.vv = self.cameraDirs[0].copy()
-
-        self.program['cameraPos'] = self.cameraPos.astype(np.float32)
-        self.program['forward'] = self.cameraDirs[0].astype(np.float32)
-        self.program['right']   = self.cameraDirs[1].astype(np.float32)
-        self.program['up']      = self.cameraDirs[2].astype(np.float32)
-
-    def on_draw(self, event):
-        gloo.clear(color='black')
-        self.program.draw('triangle_strip')
-
-    def on_timer(self, event):
-        now = time.perf_counter()
-        dt = event.dt if hasattr(event, 'dt') and event.dt is not None else (now - self.last_time)
+    while not pr.window_should_close():
+        dt = pr.get_frame_time()
         dt = min(dt, 0.05)
-        self.last_time = now
+        current_time = time.perf_counter() - t0
 
-        t = now - self.t0
-        self.program['iTime'] = t
-        self.update_camera(dt)
-        self.update()
+        if pr.is_mouse_button_down(pr.MOUSE_BUTTON_LEFT):
+            delta = pr.get_mouse_delta()
+            dx, dy = delta.x, delta.y
+
+            yaw = -dx * mouse_sensitivity
+            pitch = dy * mouse_sensitivity
+
+            f, r, u = cameraDirs[0], cameraDirs[1], cameraDirs[2]
+
+            ca, sa = np.cos(yaw), np.sin(yaw)
+            f1 = ca*f + sa*r
+            r1 = -sa*f + ca*r
+
+            cb, sb = np.cos(pitch), np.sin(pitch)
+            f2 = cb*f1 + sb*u
+            u2 = -sb*f1 + cb*u
+
+            f2 = normalize_safe(project_to_tangent(cameraPos, f2))
+            r2 = normalize_safe(project_to_tangent(cameraPos, r1))
+            r2 = r2 - f2 * np.dot(f2, r2)
+            r2 = normalize_safe(r2)
+            u2 = project_to_tangent(cameraPos, u2)
+            u2 = u2 - f2*np.dot(f2, u2) - r2*np.dot(r2, u2)
+            u2 = normalize_safe(u2)
+
+            cameraDirs = [f2, r2, u2]
+
+        local_disp = np.zeros(4, dtype=np.float64)
+        speed = moveSpeed * dt
+
+        if pr.is_key_down(pr.KEY_W): local_disp += cameraDirs[0] * speed
+        if pr.is_key_down(pr.KEY_S): local_disp -= cameraDirs[0] * speed
+        if pr.is_key_down(pr.KEY_D): local_disp += cameraDirs[1] * speed
+        if pr.is_key_down(pr.KEY_A): local_disp -= cameraDirs[1] * speed
+        if pr.is_key_down(pr.KEY_E): local_disp += cameraDirs[2] * speed
+        if pr.is_key_down(pr.KEY_Q): local_disp -= cameraDirs[2] * speed
+
+        if not np.allclose(local_disp, 0.0):
+            old_pos = cameraPos.copy()
+            new_dirs = [parallel_transport(old_pos, local_disp, d, 1.0) for d in cameraDirs]
+            new_pos = retract(old_pos, local_disp)
+
+            new_dirs = orthonormalize_at(new_pos, new_dirs)
+            cameraPos = normalize_safe(new_pos)
+            cameraDirs = new_dirs
+
+        time_ptr = pr.ffi.new("float *", current_time)
+        pr.set_shader_value(shader, loc_time, time_ptr, pr.SHADER_UNIFORM_FLOAT)
+
+        res_ptr = pr.ffi.new("float[2]", [float(width), float(height)])
+        pr.set_shader_value(shader, loc_res, res_ptr, pr.SHADER_UNIFORM_VEC2)
+
+        cam_ptr = pr.ffi.new("float[4]", cameraPos.astype(np.float32).tolist())
+        pr.set_shader_value(shader, loc_cam, cam_ptr, pr.SHADER_UNIFORM_VEC4)
+
+        fwd_ptr = pr.ffi.new("float[4]", cameraDirs[0].astype(np.float32).tolist())
+        pr.set_shader_value(shader, loc_fwd, fwd_ptr, pr.SHADER_UNIFORM_VEC4)
+
+        rgt_ptr = pr.ffi.new("float[4]", cameraDirs[1].astype(np.float32).tolist())
+        pr.set_shader_value(shader, loc_right, rgt_ptr, pr.SHADER_UNIFORM_VEC4)
+
+        up_ptr = pr.ffi.new("float[4]", cameraDirs[2].astype(np.float32).tolist())
+        pr.set_shader_value(shader, loc_up, up_ptr, pr.SHADER_UNIFORM_VEC4)
+
+        pr.begin_drawing()
+        pr.clear_background(pr.BLACK)
+
+        pr.begin_shader_mode(shader)
+        pr.draw_rectangle(0, 0, width, height, pr.WHITE)
+        pr.end_shader_mode()
+
+        pr.end_drawing()
+
+    pr.unload_shader(shader)
+    pr.close_window()
 
 if __name__ == '__main__':
-    c = Canvas()
-    app.run()
+    main()
